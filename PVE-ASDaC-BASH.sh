@@ -2819,12 +2819,38 @@ function create_custom_stand() {
             echo "# Создано: $( date '+%Y-%m-%d %H:%M:%S' )"
             echo "# ${stand_description}"
             echo
+
+            # ── Выгрузка всех шаблонов ВМ ──
+            echo "#///%%%%%%%%%%%%%%%%%%% Шаблоны настроек виртуальных машин %%%%%%%%%%%%%%%%%%%\\\\\\#"
+            echo
+            local t_key t_value
+            for t_key in $( printf '%s\n' "${!config_templates[@]}" | sort ); do
+                t_value="${config_templates[$t_key]}"
+                echo "config_templates[${t_key}]='${nl}${t_value}${nl}'"
+                echo
+            done
+
+            # ── Выгрузка ролей доступа (если используются) ──
+            if $use_access && [[ ${#config_access_roles[@]} -gt 0 ]]; then
+                echo "#///::::::::::::::::::::::::::| Роли прав доступа |:::::::::::::::::::::::::::\\\\\\#"
+                echo
+                local r_key
+                for r_key in $( printf '%s\n' "${!config_access_roles[@]}" | sort ); do
+                    echo "config_access_roles[${r_key}]='${config_access_roles[$r_key]}'"
+                done
+                echo
+            fi
+
+            # ── Выгрузка конфигурации стенда ──
+            echo "#///=========================== Конфигурация варианта установки ===========================\\\\\\#"
+            echo
             echo "config_stand_1_var[stand_config]='${nl}${stand_config_str}${nl}'"
             echo
             for vk in $( printf '%s\n' "${!all_vm_configs[@]}" | sort -V ); do
                 echo "config_stand_1_var[${vk}]='${nl}${all_vm_configs[$vk]}${nl}'"
                 echo
             done
+            echo "#<------------------------------ Конец параметров конфигурации ------------------------------->#"
         } > "$save_file" && echo_ok "Сохранено: ${c_value}${save_file}${c_null}" \
             || echo_err "Не удалось сохранить файл"
 
