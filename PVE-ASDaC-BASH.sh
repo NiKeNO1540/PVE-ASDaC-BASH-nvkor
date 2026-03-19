@@ -2479,6 +2479,368 @@ function check_arg() {
     [[ "$1" == '' || "${1:0:1}" == '-' ]] && { echo_err "Ошибка обработки аргументов: ожидалось значение. Выход"; exit 1; }
 }
 
+function create_custom_stand() {
+    echo_tty $'\n'"${c_ok}═══════════════ Мастер создания стенда ═══════════════${c_null}"$'\n'
+
+    local nl=$'\n'
+
+    # ─── Проверка наличия шаблонов ───
+    local -a avail_templates=()
+    local templ_key templ_descr
+    for templ_key in "${!config_templates[@]}"; do
+        avail_templates+=("$templ_key")
+    done
+    [[ ${#avail_templates[@]} -eq 0 ]] && {
+        echo_err "Ошибка: не найдено ни одного шаблона ВМ (config_templates). Создайте шаблон или загрузите конфигурацию с шаблонами (-c файл)"
+        return 1
+    }
+
+    # ─── Определение номера варианта ───
+    local stand_var_num
+    stand_var_num=$( compgen -v | grep -Po '^config_stand_\K[1-9][0-9]{0,3}(?=_var$)' \
+        | sort -n | awk 'BEGIN{m=0}{if($1>m)m=$1}END{print m+1}' )
+    [[ "$stand_var_num" -lt 1 ]] && stand_var_num=1
+
+    # ═══════════════════════════════════════════════════
+    # ШАГ 1: Метаданные стенда (stand_config)
+    # ═══════════════════════════════════════════════════
+    echo_tty "${c_info}── Шаг 1/3: Параметры стенда ──${c_null}"$'\n'
+
+    local stand_description stand_pool_name stand_pool_desc
+    local stand_group_desc stand_access_role stand_user_name stand_user_desc
+
+    stand_description=$( read_question_select \
+        'Название/описание стенда' '' '' '' \
+        'Пользовательский стенд' 2 )
+    [[ -z "$stand_description" ]] && stand_description='Пользовательский стенд'
+
+    stand_pool_name=$( read_question_select \
+        'Шаблон имени пула ({0} = номер стенда)' \
+        '^[\-0-9a-zA-Z\_\.]*(\{0\})?[\-0-9a-zA-Z\_\.]*$' '' '' \
+        "Custom_stand-{0}" 2 )
+    [[ -z "$stand_pool_name" ]] && stand_pool_name="Custom_stand-{0}"
+    [[ ! "$stand_pool_name" =~ \{0\} ]] && stand_pool_name+='-{0}'
+
+    stand_pool_desc=$( read_question_select \
+        'Описание пула' '' '' '' \
+        "Стенд #{0}" 2 )
+    [[ -z "$stand_pool_desc" ]] && stand_pool_desc="Стенд #{0}"
+
+    # Доступ
+    local use_access=false
+    read_question 'Создавать учётные записи для стендов?' && {
+        use_access=true
+        stand_user_name=$( read_question_select \
+            'Шаблон логина ({0} = номер)' \
+            '^[\-0-9a-zA-Z\_\.]*(\{0\})?[\-0-9a-zA-Z\_\.]*$' '' '' \
+            "User{0}" 2 )
+        [[ -z "$stand_user_name" ]] && stand_user_name="User{0}"
+        [[ ! "$stand_user_name" =~ \{0\} ]] && stand_user_name+='{0}'
+
+        stand_user_desc=$( read_question_select \
+            'Описание пользователя' '' '' '' \
+            "Учётная запись стенда #{0}" 2 )
+
+        # Выбор роли доступа
+        stand_access_role=''
+        if [[ ${#config_access_roles[@]} -gt 0 ]]; then
+            echo_tty $'\n'"Доступные роли доступа:"
+            local role_idx=0
+            local -a role_names=()
+            for r in "${!config_access_roles[@]}"; do
+                ((role_idx++))
+                role_names+=("$r")
+                echo_tty "  ${role_idx}. ${c_value}${r}${c_null}: ${config_access_roles[$r]}"
+            done
+            echo_tty "  0. Не назначать (по умолчанию PVEVMAdmin)"
+            local role_sel=$( read_question_select 'Роль для пула' '^[0-9]+$' 0 $role_idx '' 2 )
+            [[ "$role_sel" != '' && "$role_sel" != '0' ]] && \
+                stand_access_role="${role_names[$((role_sel-1))]}"
+        fi
+    }
+
+    # Собираем stand_config
+    local stand_config_str="description = ${stand_description}"
+    stand_config_str+="${nl}pool_name = ${stand_pool_name}"
+    stand_config_str+="${nl}pool_desc = ${stand_pool_desc}"
+    $use_access && {
+        stand_config_str+="${nl}access_user_name = ${stand_user_name}"
+        [[ -n "$stand_user_desc" ]] && stand_config_str+="${nl}access_user_desc = ${stand_user_desc}"
+        [[ -n "$stand_access_role" ]] && stand_config_str+="${nl}pool_access_role = ${stand_access_role}"
+    }
+
+    # ═══════════════════════════════════════════════════
+    # ШАГ 2: Топология сетей
+    # ═══════════════════════════════════════════════════
+    echo_tty $'\n'"${c_info}── Шаг 2/3: Внутренние сети стенда ──${c_null}"
+    echo_tty "Определите именованные сети, которые будут связывать ВМ между собой."
+    echo_tty "Примеры: ${c_value}ISP-HQ${c_null}, ${c_value}HQ-Net${c_null}, ${c_value}BR-Net${c_null}"
+    echo_tty "Сеть WAN (Интернет) добавляется отдельно при настройке ВМ."$'\n'
+
+    local -a stand_networks=()
+    local net_input
+    while true; do
+        net_input=$( read_question_select \
+            "Имя внутренней сети (Enter — завершить, уже добавлено: ${#stand_networks[@]})" \
+            '' '' '' '' 2 )
+        [[ -z "$net_input" ]] && break
+        # Проверка дубликатов
+        local dup=false
+        for existing in "${stand_networks[@]}"; do
+            [[ "$existing" == "$net_input" ]] && { echo_warn "Сеть '$net_input' уже добавлена"; dup=true; break; }
+        done
+        $dup && continue
+        stand_networks+=("$net_input")
+        echo_ok "Добавлена сеть: ${c_value}${net_input}"
+    done
+
+    [[ ${#stand_networks[@]} -eq 0 ]] && {
+        echo_warn "Не создано ни одной внутренней сети. ВМ будут иметь только WAN."
+    }
+
+    # ═══════════════════════════════════════════════════
+    # ШАГ 3: Виртуальные машины
+    # ═══════════════════════════════════════════════════
+    echo_tty $'\n'"${c_info}── Шаг 3/3: Виртуальные машины ──${c_null}"$'\n'
+
+    local -A all_vm_configs=()
+    local vm_idx=0
+    local add_more=true
+
+    while $add_more; do
+        ((vm_idx++))
+        echo_tty "${c_ok}╌╌╌ ВМ №${vm_idx} ╌╌╌${c_null}"$'\n'
+
+        local vm_str=''
+
+        # --- Имя ---
+        local vm_name
+        vm_name=$( read_question_select 'Имя ВМ' '^[a-zA-Z0-9][a-zA-Z0-9._\-]*$' '' '' "vm-${vm_idx}" 2 )
+        [[ -z "$vm_name" ]] && vm_name="vm-${vm_idx}"
+        vm_str="name = ${vm_name}"
+
+        # --- Шаблон ---
+        echo_tty $'\n'"Доступные шаблоны ВМ:"
+        local t_idx=0
+        for t in "${avail_templates[@]}"; do
+            ((t_idx++))
+            templ_descr=$( echo "${config_templates[$t]}" | grep -Po '^\s*templ_descr\s*=\s*\K.*' | head -1 )
+            local t_os=$( echo "${config_templates[$t]}" | grep -Po '^\s*os_descr\s*=\s*\K.*' | head -1 )
+            echo_tty "  ${t_idx}. ${c_value}${t}${c_null} — ${templ_descr:-$t_os}"
+        done
+
+        local t_sel=$( read_question_select 'Номер шаблона' '^[1-9][0-9]*$' 1 ${#avail_templates[@]} '' 2 )
+        [[ -z "$t_sel" ]] && t_sel=1
+        local sel_template="${avail_templates[$((t_sel-1))]}"
+        vm_str+="${nl}config_template = ${sel_template}"
+        echo_tty "Шаблон: ${c_value}${sel_template}${c_null}"
+
+        # --- Порядок запуска ---
+        local vm_order
+        vm_order=$( read_question_select 'Порядок запуска (1-99)' '^[0-9]+$' 1 99 "$vm_idx" 2 )
+        [[ -n "$vm_order" ]] && vm_str+="${nl}startup = order=${vm_order},up=8,down=30"
+
+        # --- Переопределение памяти ---
+        local templ_mem=$( echo "${config_templates[$sel_template]}" | grep -Po '^\s*memory\s*=\s*\K\d+' | head -1 )
+        echo_tty "Память по шаблону: ${c_value}${templ_mem:-512}${c_null} МБ"
+        read_question 'Изменить объём ОЗУ?' && {
+            local new_mem=$( read_question_select 'ОЗУ в МБ' '^[0-9]+$' 256 65536 "${templ_mem:-1024}" 2 )
+            [[ -n "$new_mem" && "$new_mem" != "$templ_mem" ]] && vm_str+="${nl}memory = ${new_mem}"
+        }
+
+        # --- Сетевые интерфейсы ---
+        echo_tty $'\n'"${c_info}Сетевые интерфейсы ВМ '${vm_name}':${c_null}"
+        local net_num=6  # начинаем с 6, как в реальных конфигах
+        local add_nets=true
+
+        # WAN
+        read_question "Подключить к WAN (Интернет)?" && {
+            local wan_opts=''
+            read_question '  Включить firewall на WAN интерфейсе?' && wan_opts=', firewall=1'
+            vm_str+="${nl}network_${net_num} = { bridge=inet${wan_opts} }"
+            ((net_num++))
+
+            # firewall_opt для WAN-машин
+            read_question '  Включить DHCP firewall опцию (для ISP-подобных машин)?' && \
+                vm_str+="${nl}firewall_opt = { enable=1, dhcp=1 }"
+        }
+
+        # Внутренние сети
+        if [[ ${#stand_networks[@]} -gt 0 ]]; then
+            echo_tty $'\n'"Внутренние сети стенда:"
+            local sn_idx=0
+            for sn in "${stand_networks[@]}"; do
+                ((sn_idx++))
+                echo_tty "  ${sn_idx}. ${c_value}${sn}${c_null}"
+            done
+            echo_tty "Введите номера сетей через запятую (напр: 1,2) или Enter — пропустить"
+
+            local net_sel
+            net_sel=$( read_question_select 'Номера сетей для этой ВМ' '' '' '' '' 2 )
+            if [[ -n "$net_sel" ]]; then
+                local IFS=','
+                for ns in $net_sel; do
+                    ns=$( echo "$ns" | tr -d ' ' )
+                    isdigit_check "$ns" 1 ${#stand_networks[@]} || continue
+                    local sel_net_name="${stand_networks[$((ns-1))]}"
+
+                    # Опции для сети
+                    local net_extra=''
+                    local use_advanced=false
+                    read_question "  Сеть '${sel_net_name}': расширенные настройки (VLAN tag, vlan_aware)?" && use_advanced=true
+
+                    if $use_advanced; then
+                        local vlan_tag vlan_aware_flag
+                        vlan_tag=$( read_question_select '    VLAN tag (пусто — без тега)' '^[0-9]*$' 1 4094 '' 2 )
+                        [[ -n "$vlan_tag" ]] && net_extra+=", tag=${vlan_tag}"
+
+                        read_question '    Включить vlan_aware на бридже?' && net_extra+=", vlan_aware=1"
+
+                        # access_role для сети
+                        if $use_access && $create_access_network; then
+                            read_question '    Назначить access_role для этого интерфейса?' && {
+                                local net_role=$( read_question_select '    Имя роли' '' '' '' 'PVESDNUser' 2 )
+                                [[ -n "$net_role" ]] && net_extra+=", access_role=${net_role}"
+                            }
+                        fi
+
+                        vm_str+="${nl}network_${net_num} = { bridge=\"🖧🖧: ${sel_net_name}\"${net_extra} }"
+                    else
+                        vm_str+="${nl}network_${net_num} = 🖧🖧: ${sel_net_name}"
+                    fi
+                    ((net_num++))
+                done
+                unset IFS
+            fi
+        fi
+
+        [[ $net_num -eq 6 ]] && {
+            echo_warn "ВМ '${vm_name}' не имеет ни одного сетевого интерфейса"
+        }
+
+        # --- Дополнительные диски ---
+        read_question $'\n'"Добавить дополнительные диски (помимо загрузочного из шаблона)?" && {
+            local disk_idx=1
+            while true; do
+                echo_tty "  Доп. диск ${disk_idx}:"
+                echo_tty "    1. Пустой диск (указать размер)"
+                echo_tty "    2. ISO-образ (URL)"
+                echo_tty "    3. Готово"
+                local d_sel=$( read_question_select '    Тип' '^[1-3]$' '' '' '' 2 )
+                case "$d_sel" in
+                    1)  local d_size=$( read_question_select '    Размер (ГБ)' '^[0-9]+(\.[0-9]+)?$' '' '' '1' 2 )
+                        [[ -n "$d_size" ]] && { vm_str+="${nl}disk_${disk_idx} = ${d_size} GB"; ((disk_idx++)); }
+                        ;;
+                    2)  local iso_url=$( read_question_select '    URL ISO-образа' '' '' '' '' 2 )
+                        [[ -n "$iso_url" ]] && { vm_str+="${nl}iso_${disk_idx} = ${iso_url}"; ((disk_idx++)); }
+                        ;;
+                    *)  break ;;
+                esac
+            done
+        }
+
+        # --- access_role per-VM ---
+        if $use_access && $create_access_network && [[ ${#config_access_roles[@]} -gt 0 ]]; then
+            read_question $'\n'"Назначить отдельную access_role для этой ВМ?" && {
+                echo_tty "Роли:"
+                local ar_idx=0
+                for ar in "${!config_access_roles[@]}"; do
+                    ((ar_idx++))
+                    echo_tty "  ${ar_idx}. ${c_value}${ar}${c_null}"
+                done
+                local ar_sel=$( read_question_select 'Номер роли' '^[0-9]+$' 1 $ar_idx '' 2 )
+                [[ -n "$ar_sel" ]] && {
+                    local ar_idx2=0
+                    for ar in "${!config_access_roles[@]}"; do
+                        ((ar_idx2++))
+                        [[ $ar_idx2 -eq $ar_sel ]] && { vm_str+="${nl}access_role = ${ar}"; break; }
+                    done
+                }
+            }
+        fi
+
+        # Сохраняем ВМ
+        all_vm_configs[vm_${vm_idx}]="$vm_str"
+        echo_tty $'\n'"${c_ok}ВМ '${vm_name}' добавлена${c_null}"
+
+        echo_tty
+        read_question 'Добавить ещё ВМ?' || add_more=false
+    done
+
+    [[ $vm_idx -eq 0 ]] && { echo_err "Не добавлено ни одной ВМ. Отмена."; return 1; }
+
+    # ═══════════════════════════════════════════════════
+    # Предпросмотр
+    # ═══════════════════════════════════════════════════
+    echo_tty $'\n'"${c_info}═══ Предпросмотр конфигурации стенда ═══${c_null}"$'\n'
+    echo_tty "Описание: ${c_value}${stand_description}${c_null}"
+    echo_tty "Пул:      ${c_value}${stand_pool_name}${c_null}"
+    [[ ${#stand_networks[@]} -gt 0 ]] && echo_tty "Сети:     ${c_value}${stand_networks[*]}${c_null}"
+    echo_tty "ВМ (${vm_idx}):"
+
+    local preview_key preview_name preview_templ
+    for preview_key in $( printf '%s\n' "${!all_vm_configs[@]}" | sort -V ); do
+        preview_name=$( echo "${all_vm_configs[$preview_key]}" | grep -Po '^name = \K.*' )
+        preview_templ=$( echo "${all_vm_configs[$preview_key]}" | grep -Po '^config_template = \K.*' )
+        local preview_nets=$( echo "${all_vm_configs[$preview_key]}" | grep -Po '^network_\d+ = \K.*' | tr '\n' ', ' | sed 's/,$//' )
+        echo_tty "  ${c_value}${preview_name}${c_null} [${preview_templ}] сети: ${preview_nets:-нет}"
+    done
+
+    echo_tty
+    read_question 'Применить конфигурацию?' || { echo_warn 'Отменено'; return 0; }
+
+    # ═══════════════════════════════════════════════════
+    # Создание конфигурации в памяти
+    # ═══════════════════════════════════════════════════
+    eval "declare -Ag config_stand_${stand_var_num}_var=()"
+    local -n ref_stand="config_stand_${stand_var_num}_var"
+    ref_stand[stand_config]="$stand_config_str"
+    for vk in "${!all_vm_configs[@]}"; do
+        ref_stand[$vk]="${all_vm_configs[$vk]}"
+    done
+
+    # Перепроцессинг новой конфигурации
+    terraform_config_vars
+
+    echo_ok "Создан вариант развёртывания №${c_value}${stand_var_num}${c_null}: '${stand_description}'"
+
+    # ═══════════════════════════════════════════════════
+    # Сохранение в файл
+    # ═══════════════════════════════════════════════════
+    echo_tty
+    read_question 'Сохранить конфигурацию в файл?' && {
+        local save_file
+        save_file=$( read_question_select 'Имя файла' '' '' '' \
+            "$( echo "${stand_pool_name/\{0\}/}" | tr -d '{}' | sed 's/-*$//' ).conf" 2 )
+        [[ -z "$save_file" ]] && save_file="stand_${stand_var_num}.conf"
+
+        {
+            echo "# PVE-ASDaC-BASH: конфигурация стенда"
+            echo "# Создано: $( date '+%Y-%m-%d %H:%M:%S' )"
+            echo "# ${stand_description}"
+            echo
+            echo "config_stand_1_var[stand_config]='${nl}${stand_config_str}${nl}'"
+            echo
+            for vk in $( printf '%s\n' "${!all_vm_configs[@]}" | sort -V ); do
+                echo "config_stand_1_var[${vk}]='${nl}${all_vm_configs[$vk]}${nl}'"
+                echo
+            done
+        } > "$save_file" && echo_ok "Сохранено: ${c_value}${save_file}${c_null}" \
+            || echo_err "Не удалось сохранить файл"
+
+        echo_info "Загрузка: ${c_value}$0 -c ${save_file}${c_null}"
+    }
+
+    # ═══════════════════════════════════════════════════
+    # Запуск развёртывания
+    # ═══════════════════════════════════════════════════
+    echo_tty
+    read_question 'Запустить развёртывание?' && {
+        opt_sel_var=$stand_var_num
+        install_stands
+    }
+}
+
 function manage_bulk_vm_power() {
     [[ "$1" == '' ]] && exit_clear
     [[ -v bulk_vms_power_list ]] || declare -Ag bulk_vms_power_list
@@ -3347,15 +3709,19 @@ $silent_mode && {
 
 
 while ! $silent_mode; do
-    echo_tty $'\nДействие: 1 - Развертывание стендов, 2 - Управление стендами, 3 - Утилиты\n'
-    switch_action=$( read_question_select $'Выберите действие' '^[1-3]$' '' '' '' 2 )
-
+    echo_tty $'\nДействие:'
+    echo_tty '  1 - Развертывание стендов'
+    echo_tty '  2 - Управление стендами'
+    echo_tty '  3 - Утилиты'
+    echo_tty '  4 - Создание своего стенда'
+    echo_tty
+    switch_action=$( read_question_select $'Выберите действие' '^[1-4]$' '' '' '' 2 )
     case $switch_action in
         1) install_stands || exit_clear 0;;
         2) manage_stands || exit_clear 0;;
         3) utilities_menu || exit_clear 0;;
+        4) create_custom_stand;;
         '') exit_clear 0;;
-        *) echo_warn 'Функционал в процессе разработки и пока недоступен. Выход'; exit_clear 0;;
     esac
 done
 
