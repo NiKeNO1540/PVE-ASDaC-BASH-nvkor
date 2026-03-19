@@ -3576,7 +3576,7 @@ function tweak_set_ovs_and_fix_script() {
 
 # This script was generated automatically by PVE-ASDaC-BASH
 # https://github.com/PavelAF/PVE-ASDaC-BASH
-# Author: PavelAF
+# Author: PavelAF, Modified by: NiKeNO1540(Creation of Custom stands)
 # Temporary fix for loss of ovs_options parameters during network reload (ifreload) for OVSBridge interfaces
 if [ "${IF_OVS_TYPE}" != OVSBridge ] || [ "$MODE" != start ] || [ -z "${IF_OVS_OPTIONS}" ] || ! ovs-vsctl --version > /dev/null 2>&1
 then
@@ -3706,6 +3706,12 @@ else silent_mode=false
 fi
 
 if $opt_show_help; then show_help; exit_clear 0; fi
+
+echo_tty
+echo_tty "${c_ok}Proxmox VE Automatic stand deployment and configuration script by PavelAF, Modified by NiKeNO1540${c_null}"
+echo_tty "${c_info}Original GitHub link: ${c_value}https://github.com/PavelAF/PVE-ASDaC-BASH${c_null}"
+echo_tty "${c_info}Modified GitHub link: ${c_value}https://github.com/NiKeNO1540/PVE-ASDaC-BASH-nvkor${c_null}"
+echo_tty
 
 check_config base-check
 terraform_config_vars
