@@ -21,7 +21,7 @@
 </details>
 
 <details open>
-  <summary><b>👉 Конфигурации авторазвертывания для СПО (ДЭ и РЧ)</b></summary>
+  <summary><b>👉 Конфигурации авторазвертывания для СПО (ДЭ)</b></summary>
   <br>
   
   - **[v6] Стенды демекзамена 09.02.06-2026, используются разные комбинации ОС.**
@@ -29,37 +29,26 @@
   (b=testing_api cmd=( PVE-ASDaC-BASH.sh -c 'https://disk.yandex.ru/d/LeO_mzwnvOeEKg' -z ) ;curl -sfOL "https://raw.githubusercontent.com/NiKeNO1540/PVE-ASDaC-BASH-nvkor/$b/${cmd[0]}"&&{ chmod +x ${cmd[0]}&&./"${cmd[@]}";rm -f ${cmd[0]};:;}||echo -e "\e[1;33m\nОшибка скачивания: проверьте подключение к Интернету, настройки DNS, прокси и URL адрес\ncurl exit code: $?\n\e[m">&2)
   ```
   </details>
-</details>
-<details>
-  <summary><b>👉 Конфигурации авторазвертывания для юниоров </b></summary>
-  <br>
-  
-  - **[Ред.] Стенды для регионального чемпионата ССА Юниоры 2026 (модуль Б и Г)**
-  ```bash
-  (b=testing_api opts=( PVE-ASDaC-BASH.sh -c 'https://disk.yandex.ru/d/YR3eelCZR_JVXQ/Script-Images/ASDaC_RCJ-2025_multi.conf_v2.txt' -z ) ;curl -sfOL "https://raw.githubusercontent.com/PavelAF/PVE-ASDaC-BASH/$b/${opts[0]}"&&{ chmod +x ${opts[0]}&&./"${opts[@]}";rm -f ${opts[0]};:;}||echo -e "\e[1;33m\nОшибка скачивания: проверьте подключение к Интернету, настройки DNS, прокси и URL адрес\ncurl exit code: $?\n\e[m">&2)
-  ```
-  <details>
+    <details>
     <summary>👉 <b>Информация</b>: автор конфигурации, инструкция по развертыванию</summary>
     <br>
-    Разработчик: Рачеев А.В.<br>
-    Под редакцией <a href="https://github.com/PavelAF">@PavelAF</a>
+    Разработчик оригинального скрипта: <a href="https://github.com/PavelAF">@PavelAF</a>.<br>
+    Модифицированно пользователем <a href="https://github.com/NiKeNO1540">@NiKeNO1540</a>
     <br><br>
     
-Ссылка на инструкцию [README](https://disk.yandex.ru/d/YR3eelCZR_JVXQ/Script-Images/README.txt)<br>
-Ссылка общую папку с файлами по заданию: [https://disk.yandex.ru/d/YR3eelCZR_JVXQ](https://disk.yandex.ru/d/YR3eelCZR_JVXQ)
+Ссылка на инструкцию [README](https://disk.yandex.ru/d/YR3eelCZR_JVXQ/Script-Images/README.txt) (За авторством PavelAF)<br>
+Ссылка на оригинальный репозиторий: [https://github.com/PavelAF/PVE-ASDaC-BASH](https://github.com/PavelAF/PVE-ASDaC-BASH)
     
   </details>
-  
-  ___
 </details>
 
 > [!NOTE]
-> **👉 [Архивные конфигурации](./deployment_configs.md)**
+> **👉 [Архивные конфигурации PavelAF](./deployment_configs.md)**
 <br>
 
-**PVE-ASDaC-BASH** - скрипт простого авторазвертывания конфигураций ИТ-инфраструктуры на базе платформ виртуализаций Proxmox VE и Альт Виртуализация (PVE)
+**PVE-ASDaC-BASH-nvkor** - скрипт простого авторазвертывания конфигураций ИТ-инфраструктуры на базе платформ виртуализаций Proxmox VE и Альт Виртуализация (PVE)
 <br><br>
-Скрипт позволяет просто и быстро автоматизировать развертывание стендов для различных мероприятий (Чемпионаты "Профессионалы", демонстрационый экзамен, учебные стенды и пр.), управлять конфигурацией, создавать свои конфигурации авторазвертывания
+Скрипт позволяет просто и быстро автоматизировать развертывание стендов для различных мероприятий (Чемпионаты "Профессионалы", демонстрационый экзамен, учебные стенды и пр.), управлять конфигурацией, создавать свои конфигурации авторазвертывания.
 <br><br>
 **Поддерживаемые версии платформ:** Proxmox&nbsp;VE&nbsp;7.2&nbsp;-&nbsp;9.x, Альт&nbsp;Виртуализация&nbsp;10.x&nbsp;-&nbsp;11.x
 <br>
