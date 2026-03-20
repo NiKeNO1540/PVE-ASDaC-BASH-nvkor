@@ -30,7 +30,7 @@
   ```
   </details>
     <details>
-    <summary>👉 <b>Информация</b>: автор конфигурации, инструкция по развертыванию</summary>
+    <summary>👉 <b>Информация</b>: автор скрипта, инструкция по развертыванию</summary>
     <br>
     Разработчик оригинального скрипта: <a href="https://github.com/PavelAF">@PavelAF</a>.<br>
     Модифицированно пользователем <a href="https://github.com/NiKeNO1540">@NiKeNO1540</a>
