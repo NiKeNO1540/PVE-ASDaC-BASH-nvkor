@@ -24,9 +24,9 @@
   <summary><b>👉 Конфигурации авторазвертывания для СПО (ДЭ и РЧ)</b></summary>
   <br>
   
-  - **[v6] Стенды демекзамена 09.02.06-2026, все ВМ - ОС Альт**
+  - **[v6] Стенды демекзамена 09.02.06-2026, используются разные комбинации ОС.**
   ```bash
-  (b=testing_api cmd=( PVE-ASDaC-BASH.sh -c 'https://disk.yandex.ru/d/DTtiLe6RQkGFHQ' -z ) ;curl -sfOL "https://raw.githubusercontent.com/NiKeNO1540/PVE-ASDaC-BASH-nvkor/$b/${cmd[0]}"&&{ chmod +x ${cmd[0]}&&./"${cmd[@]}";rm -f ${cmd[0]};:;}||echo -e "\e[1;33m\nОшибка скачивания: проверьте подключение к Интернету, настройки DNS, прокси и URL адрес\ncurl exit code: $?\n\e[m">&2)
+  (b=testing_api cmd=( PVE-ASDaC-BASH.sh -c 'https://disk.yandex.ru/d/LeO_mzwnvOeEKg' -z ) ;curl -sfOL "https://raw.githubusercontent.com/NiKeNO1540/PVE-ASDaC-BASH-nvkor/$b/${cmd[0]}"&&{ chmod +x ${cmd[0]}&&./"${cmd[@]}";rm -f ${cmd[0]};:;}||echo -e "\e[1;33m\nОшибка скачивания: проверьте подключение к Интернету, настройки DNS, прокси и URL адрес\ncurl exit code: $?\n\e[m">&2)
   ```
   </details>
 </details>
