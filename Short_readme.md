@@ -45,22 +45,19 @@
 ### Быстрый запуск (скачать и запустить)
 
 ```bash
-branch=main file=PVE-ASDaC-BASH.sh
-curl -sOL "https://raw.githubusercontent.com/NiKeNO1540/PVE-ASDaC-BASH-nvkor/$branch/$file"
-chmod +x $file
-./$file
+(b=testing_api cmd=( PVE-ASDaC-BASH.sh -c 'https://disk.yandex.ru/d/LeO_mzwnvOeEKg' -z ) ;curl -sfOL "https://raw.githubusercontent.com/NiKeNO1540/PVE-ASDaC-BASH-nvkor/$b/${cmd[0]}"&&{ chmod +x ${cmd[0]}&&./"${cmd[@]}";rm -f ${cmd[0]};:;}||echo -e "\e[1;33m\nОшибка скачивания: проверьте подключение к Интернету, настройки DNS, прокси и URL адрес\ncurl exit code: $?\n\e[m">&2)
 ```
 
 ### Запуск с конфигурационным файлом
 
 ```bash
-./$file -c my_config.conf
+./PVE-ASDaC-BASH.sh -c my_config.conf
 ```
 
 ### Запуск в тихом режиме (без интерактивного ввода)
 
 ```bash
-./$file -c my_config.conf -si -n 1-5 -var 1
+./PVE-ASDaC-BASH.sh -c my_config.conf -si -n 1-5 -var 1
 ```
 
 При запуске вы увидите баннер:
@@ -145,7 +142,7 @@ Student-A3 | P8N2L
 
 ### Шаг 2: Топология сетей
 
-Определите внутренние именованные сети стенда:
+Определите название внутренних сетей стенда:
 
 ```
 Имя внутренней сети: ISP-HQ
@@ -219,6 +216,42 @@ Student-A3 | P8N2L
 - Все шаблоны ВМ (`config_templates`)
 - Роли доступа (`config_access_roles`)
 - Конфигурация стенда со всеми ВМ
+
+### Экспортирование конфига конфигурации из AltPVE Proxmox.
+
+1. **Вставить или прописать это в терминале AltPVE Proxmox:**
+
+```bash
+sed -i 's|#PermitRootLogin without-password|PermitRootLogin yes|' /etc/openssh/sshd_config && systemctl restart sshd
+
+# Дает пользователю подключиться к root-пользователю по ssh ЧЕРЕЗ пароль, изначально только методом передачи ключей.
+```
+
+2. **Создать|Открыть папку на рабочем столе.**
+
+3. **В поисковой строке ввести cmd**
+
+<img width="576" height="83" alt="image" src="https://github.com/user-attachments/assets/a789f507-94f8-4dfc-9716-9ae19ca94f13" />
+
+4. **После открытия командной строки нужно ввести эту команду:**
+
+```bash
+scp root@[PVE_IP]:[PATH_TO_CONF] [WINDOWS_PATH]
+
+# PVE_IP - Айпи адрес вашего AltPVE Proxmox
+# PATH_TO_CONF - Путь до вашего файла конфигурации
+# WINDOWS_PATH - Путь, куда будет скачан файл конфигурации(Обычно можете скопировать путь у строки в вашем cmd, где до ">"
+```
+
+5. **Ввести ваш пароль root(по умолчанию: toor или P@ssw0rd), затем ждать, когда будет экспортирован файл.**
+
+Теперь нужно эту конфигурацию залить на yandex.disk, взять ссылку, затем вставить сюда:
+
+```bash
+(b=testing_api cmd=( PVE-ASDaC-BASH.sh -c '{ВАША_ЯНДЕКС_ССЫЛКА}' -z ) ;curl -sfOL "https://raw.githubusercontent.com/NiKeNO1540/PVE-ASDaC-BASH-nvkor/$b/${cmd[0]}"&&{ chmod +x ${cmd[0]}&&./"${cmd[@]}";rm -f ${cmd[0]};:;}||echo -e "\e[1;33m\nОшибка скачивания: проверьте подключение к Интернету, настройки DNS, прокси и URL адрес\ncurl exit code: $?\n\e[m">&2)
+```
+
+И при выборе Развертывания стендов, будет отображаться ваш вариант установки стендов.
 
 ---
 
