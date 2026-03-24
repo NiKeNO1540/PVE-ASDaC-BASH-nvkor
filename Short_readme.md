@@ -13,6 +13,7 @@
 9. [Работа с конфигурационными файлами](#9-работа-с-конфигурационными-файлами)
 10. [Аргументы командной строки](#10-аргументы-командной-строки)
 11. [Частые ошибки и решения](#11-частые-ошибки-и-решения)
+12. [Создание linked clone](#12-создание-linked-clone)
 
 ---
 
@@ -454,3 +455,184 @@ config_stand_1_var[vm_2]='
 ```
 
 Выберите все стенды (Enter) — все ВМ будут сброшены к исходному снапшоту.
+
+---
+
+## 12. Создание linked clone 
+
+Для экспорта образа ВМ в сжатом виде используется способ под названием `linked clone.` Основное отличие от `full clone` - экспорт изменений по отношению к базовому образу.
+
+1. **Необходимо запустить и выключить ВМ, чтобы их диски появились в /dev/pve/:**
+
+```bash
+qm start <VMID> && sleep 45 && qm stop <VMID>
+
+# VMID - Виртуальный айди ВМ.
+```
+
+2. **Скачать базовый образ, который будет основой для linked clone(рекомендуется оставлять образы после развертывания).**
+
+```bash
+# Это метод с yandex.disk, так как там используется API для закачивания.
+PUBLIC_URL='https://disk.yandex.com/d/XXXXXXXXXXXX'
+
+DOWNLOAD_URL=$(curl -s \
+  "https://cloud-api.yandex.net/v1/disk/public/resources/download?public_key=${PUBLIC_URL}" \
+  | sed -n 's/.*"href":"\([^"]*\)".*/\1/p' \
+  | sed 's/\\u0026/\&/g')
+
+curl -O -L "$DOWNLOAD_URL"
+```
+
+```bash
+# Примеры, как скачивать файл с других ресурсов.
+curl -O https://example.com/file.zip
+
+curl -L -O https://example.com/file.zip
+```
+
+3. **Вставить скрипт конвертации и запустить:**
+
+```bash
+#!/bin/bash
+set -e
+
+# === НАСТРОЙКИ ===
+# VMID = ID машины, из которой будет брать изменения.
+VMID=10101
+# BASE_QCOW2 = Путь, куда ведет к базовому образу
+BASE_QCOW2="/var/lib/vz/template/Alt-JeOS-p10.qcow2"
+LVM_DISK="/dev/pve/vm-${VMID}-disk-0"
+# OUTPUT_DIR = Это путь, где будет находиться результат.
+OUTPUT_DIR="/var/lib/vz/images/${VMID}"
+DIFF_DISK="${OUTPUT_DIR}/vm-${VMID}-disk-0.diff.qcow2"
+TEMP_FULL="${OUTPUT_DIR}/vm-${VMID}-full.tmp.qcow2"
+
+# === ПРОВЕРКИ ===
+if [ ! -f "$BASE_QCOW2" ]; then
+    echo "[✗] Base image not found: $BASE_QCOW2"
+    exit 1
+fi
+
+if [ ! -b "$LVM_DISK" ]; then
+    echo "[✗] LVM disk not found: $LVM_DISK"
+    exit 1
+fi
+
+if qm status $VMID 2>/dev/null | grep -q "running"; then
+    echo "[✗] VM ${VMID} запущена! Сначала выключи: qm shutdown ${VMID}"
+    exit 1
+fi
+
+if ! command -v zerofree &>/dev/null; then
+    echo "[✗] zerofree не установлен! apt-get install zerofree"
+    exit 1
+fi
+
+mkdir -p "$OUTPUT_DIR"
+
+# === ШАГ 1: zerofree на LVM-томе ===
+echo "[1/5] Zerofree на LVM-томе..."
+
+PARTITIONS=$(kpartx -l "$LVM_DISK" 2>/dev/null | awk '{print $1}') || true
+
+if [ -z "$PARTITIONS" ]; then
+    echo "      Диск без таблицы разделов..."
+    zerofree -v "$LVM_DISK" || true
+else
+    echo "      Маппим разделы..."
+    kpartx -a "$LVM_DISK" || true
+    sleep 1
+
+    for PART in $PARTITIONS; do
+        DEV="/dev/mapper/${PART}"
+        if [ ! -b "$DEV" ]; then
+            echo "      Пропускаем ${DEV} (не найден)"
+            continue
+        fi
+        FSTYPE=$(blkid -o value -s TYPE "$DEV" 2>/dev/null) || true
+
+        if [ "$FSTYPE" = "ext2" ] || [ "$FSTYPE" = "ext3" ] || [ "$FSTYPE" = "ext4" ]; then
+            echo "      zerofree на ${DEV} (${FSTYPE})..."
+            zerofree -v "$DEV" || true
+        else
+            echo "      Пропускаем ${DEV} (${FSTYPE:-unknown})"
+        fi
+    done
+
+    echo "      Убираем маппинг..."
+    kpartx -d "$LVM_DISK" || true
+    sleep 1
+fi
+
+echo "      Zerofree завершён."
+
+# === ШАГ 2: LVM → полный qcow2 ===
+echo "[2/5] LVM → полный qcow2..."
+qemu-img convert -f raw -O qcow2 \
+    "$LVM_DISK" \
+    "$TEMP_FULL"
+
+# === ШАГ 3: Rebase на базу ===
+echo "[3/5] Rebase → вычисляем diff..."
+qemu-img rebase \
+    -b "$BASE_QCOW2" \
+    -F qcow2 \
+    -f qcow2 \
+    "$TEMP_FULL"
+
+# === ШАГ 4: Пересоздать со сжатием ===
+echo "[4/5] Пересоздаём diff со сжатием..."
+qemu-img convert -f qcow2 -O qcow2 -c \
+    -B "$BASE_QCOW2" -F qcow2 \
+    "$TEMP_FULL" \
+    "$DIFF_DISK"
+
+# === ШАГ 5: Cleanup ===
+echo "[5/5] Удаляем временные файлы..."
+rm -f "$TEMP_FULL"
+
+echo ""
+echo "=== Результат ==="
+echo "Base: $(du -sh "$BASE_QCOW2" | cut -f1)"
+echo "Diff: $(du -sh "$DIFF_DISK" | cut -f1)"
+echo ""
+qemu-img info --backing-chain "$DIFF_DISK"
+echo ""
+echo "[✓] Готово: $DIFF_DISK"
+```
+
+4. **Настройка прав доступа по ssh для root:**
+
+```bash
+sed -i 's|#PermitRootLogin without-password|PermitRootLogin yes|' /etc/openssh/sshd_config && systemctl restart sshd
+
+# Дает пользователю подключиться к root-пользователю по ssh ЧЕРЕЗ пароль, изначально только методом передачи ключей.
+```
+
+5. Экспорт образа из VM на реальный ПК:
+
+> **После создания .diff.qcow2 образа, заходим на рабочий стол, создаем папку, открываем cmd (через поисковую строку), затем вводим:**
+
+```bash
+scp root@[PVE_IP]:[PATH_TO_QCOW] [WINDOWS_PATH]
+
+# PVE_IP - Айпи адрес вашего AltPVE Proxmox
+# PATH_TO_QCOW - Путь до вашего .diff.qcow2 образа
+# WINDOWS_PATH - Путь, куда будет скачан файл конфигурации(Обычно можете скопировать путь у строки в вашем cmd, где до ">"
+```
+
+6. Публикация образа в облаке для последующего использования:
+
+> **Выгружайте образ на яндекс диск, затем в своей конфигурации используете ссылку на образ из **___yandex_url___** как показано на примере:**
+
+```txt
+config_stand_{0}_var[vm_{0}]='
+        name            = Testplate
+        config_template = Testplate
+        startup         = order=2,up=8,down=20
+        network_6       = 🖧: Testplate1
+        network_7       = 🖧: Testplate2
+        boot_disk_0_opt = { overlay_img=yandex_url }
+'
+```
