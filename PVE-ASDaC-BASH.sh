@@ -2884,29 +2884,20 @@ function create_custom_stand() {
             while true; do
                 echo_tty "  Доп. диск ${disk_idx}:"
                 echo_tty "    1. Пустой диск (указать размер)"
-                echo_tty "    2. ISO-образ (URL или путь)"
-                echo_tty "    3. Образ диска / OVA (URL или путь)"
-                echo_tty "    4. Готово"
-                local d_sel=$( read_question_select '    Тип' '^[1-4]$' '' '' '' 2 )
+                echo_tty "    2. ISO-образ (URL)"
+                echo_tty "    3. Готово"
+                local d_sel=$( read_question_select '    Тип' '^[1-3]$' '' '' '' 2 )
                 case "$d_sel" in
                     1)  local d_size=$( read_question_select '    Размер (ГБ)' '^[0-9]+(\.[0-9]+)?$' '' '' '1' 2 )
                         [[ -n "$d_size" ]] && { vm_str+="${nl}disk_${disk_idx} = ${d_size} GB"; ((disk_idx++)); }
                         ;;
-                    2)  local iso_url=$( read_question_select '    URL/путь к ISO' '' '' '' '' 2 )
+                    2)  local iso_url=$( read_question_select '    URL ISO-образа' '' '' '' '' 2 )
                         [[ -n "$iso_url" ]] && { vm_str+="${nl}iso_${disk_idx} = ${iso_url}"; ((disk_idx++)); }
-                        ;;
-                    3)  local img_url=$( read_question_select '    URL/путь к образу (.qcow2, .vmdk, .ova и др.)' '' '' '' '' 2 )
-                        if [[ -n "$img_url" ]]; then
-                            local disk_boot_prefix=''
-                            read_question '    Сделать загрузочным?' && disk_boot_prefix='boot_'
-                            vm_str+="${nl}${disk_boot_prefix}disk_${disk_idx} = ${img_url}"
-                            ((disk_idx++))
-                        fi
                         ;;
                     *)  break ;;
                 esac
-			done
-		)
+            done
+        }
 
         # --- access_role per-VM ---
         if $use_access && $create_access_network && [[ ${#config_access_roles[@]} -gt 0 ]]; then
