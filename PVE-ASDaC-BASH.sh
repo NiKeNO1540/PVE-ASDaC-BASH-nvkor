@@ -2905,6 +2905,8 @@ function create_custom_stand() {
                         ;;
                     *)  break ;;
                 esac
+			done
+		)
 
         # --- access_role per-VM ---
         if $use_access && $create_access_network && [[ ${#config_access_roles[@]} -gt 0 ]]; then
