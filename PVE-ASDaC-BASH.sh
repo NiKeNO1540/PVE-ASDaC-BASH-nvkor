@@ -1042,6 +1042,12 @@ function get_file() {
     fi
     [[ -r "$filename" ]] || { echo_err "Ошибка: файл '$filename' должен существовать и быть доступен для чтения"; exit_clear; }
     [[ $3 == iso ]] && url="${config_base[iso_storage]}:iso/$( grep -Po '.*/\K.*' <<<$filename )"
+	    if [[ $3 != iso && $3 != diff ]]; then
+        local _check_ova="$url"
+        if import_ova_disk _check_ova 2>/dev/null; then
+            url="$_check_ova"
+        fi
+    fi
     [[ $3 == diff ]] && {
         local diff_full diff_backing convert_threads convert_compress
         convert_threads=$( nproc | awk '{if($1>16) print 16; else print $1}' )
@@ -1818,6 +1824,154 @@ function run_cmd() {
     fi
 }
 
+function import_ova_disk() {
+    # Извлекает диск(и) из OVA архива и возвращает путь к сконвертированному образу
+    # Использование: import_ova_disk <переменная_с_путём_ova> [номер_диска]
+    # Результат: переменная будет перезаписана путём к готовому qcow2/raw файлу
+    
+    [[ "$1" == '' ]] && { echo_err "Ошибка $FUNCNAME: не указана переменная"; exit_clear; }
+    local -n ref_ova_path="$1"
+    local disk_index=${2:-0}
+    local ova_file="$ref_ova_path"
+    local ova_extract_dir=''
+    local ova_basename=''
+    
+    # Проверяем что файл — действительно OVA/tar
+    local file_mime
+    file_mime=$( file -bi "$ova_file" 2>/dev/null )
+    
+    if [[ ! "$file_mime" =~ application/(x-tar|x-gtar|octet-stream) ]] && \
+       [[ ! "$ova_file" =~ \.(ova|OVA)$ ]]; then
+        # Не OVA файл — возвращаем как есть (обычный образ диска)
+        return 1
+    fi
+    
+    ova_basename=$( basename "$ova_file" .ova )
+    ova_extract_dir=$( mktemp -d "${config_base[mk_tmpfs_imgdir]}/ova_${ova_basename}_XXXXXX" ) \
+        || { echo_err "Ошибка $FUNCNAME: не удалось создать временную директорию"; exit_clear; }
+    
+    echo_tty "[${c_info}OVA${c_null}] Распаковка ${c_value}${ova_file##*/}${c_null}..."
+    
+    # Извлекаем содержимое OVA
+    tar -xf "$ova_file" -C "$ova_extract_dir" 2>/dev/null \
+        || { echo_err "Ошибка $FUNCNAME: не удалось распаковать OVA архив '$ova_file'"; rm -rf "$ova_extract_dir"; exit_clear; }
+    
+    # Ищем OVF файл для информации
+    local ovf_file
+    ovf_file=$( find "$ova_extract_dir" -maxdepth 1 -iname '*.ovf' -print -quit )
+    
+    if [[ -n "$ovf_file" ]]; then
+        echo_verbose "[OVA] Найден OVF: $ovf_file"
+        
+        # Извлекаем информацию из OVF (имя ВМ, описание)
+        local ovf_vm_name ovf_vm_descr
+        ovf_vm_name=$( grep -oP '<VirtualSystem[^>]*ovf:id="\K[^"]+' "$ovf_file" 2>/dev/null | head -1 )
+        ovf_vm_descr=$( grep -oP '<AnnotationSection>.*?<Info>\K[^<]+' "$ovf_file" 2>/dev/null | head -1 )
+        [[ -n "$ovf_vm_name" ]] && echo_verbose "[OVA] Имя ВМ из OVF: $ovf_vm_name"
+        [[ -n "$ovf_vm_descr" ]] && echo_verbose "[OVA] Описание из OVF: $ovf_vm_descr"
+    fi
+    
+    # Ищем файлы дисков
+    local -a disk_files=()
+    local disk_f
+    
+    # Порядок поиска: vmdk, vdi, vhd, qcow2, raw, img
+    while IFS= read -r -d '' disk_f; do
+        disk_files+=("$disk_f")
+    done < <( find "$ova_extract_dir" -maxdepth 1 \
+        \( -iname '*.vmdk' -o -iname '*.vdi' -o -iname '*.vhd' -o -iname '*.vhdx' \
+           -o -iname '*.qcow2' -o -iname '*.raw' -o -iname '*.img' \) \
+        -print0 | sort -z )
+    
+    [[ ${#disk_files[@]} -eq 0 ]] && {
+        echo_err "Ошибка $FUNCNAME: в OVA архиве не найдено файлов дисков"
+        echo_err "Содержимое архива:"
+        ls -la "$ova_extract_dir" >&2
+        rm -rf "$ova_extract_dir"
+        exit_clear
+    }
+    
+    echo_tty "[${c_info}OVA${c_null}] Найдено дисков: ${c_value}${#disk_files[@]}${c_null}"
+    local i=0
+    for disk_f in "${disk_files[@]}"; do
+        echo_tty "  ${c_value}$((i++)). ${disk_f##*/}${c_null} ($( du -h "$disk_f" | awk '{print $1}' ))"
+    done
+    
+    # Выбираем нужный диск
+    if [[ $disk_index -ge ${#disk_files[@]} ]]; then
+        echo_warn "[OVA] Запрошен диск №${disk_index}, но в архиве только ${#disk_files[@]} диск(ов). Используется диск №0"
+        disk_index=0
+    fi
+    
+    local selected_disk="${disk_files[$disk_index]}"
+    local disk_ext="${selected_disk##*.}"
+    local output_disk="${config_base[mk_tmpfs_imgdir]}/${ova_basename}_disk${disk_index}.qcow2"
+    
+    # Определяем формат исходного диска
+    local src_format
+    case "${disk_ext,,}" in
+        vmdk)  src_format=vmdk ;;
+        vdi)   src_format=vdi ;;
+        vhd|vhdx) src_format=vpc ;;
+        qcow2) src_format=qcow2 ;;
+        raw|img) src_format=raw ;;
+        *)
+            # Определяем формат через qemu-img
+            src_format=$( qemu-img info --output=json "$selected_disk" 2>/dev/null \
+                | grep -Po '"format"\s*:\s*"\K[^"]+' )
+            [[ -z "$src_format" ]] && {
+                echo_err "Ошибка $FUNCNAME: не удалось определить формат диска '${selected_disk##*/}'"
+                rm -rf "$ova_extract_dir"
+                exit_clear
+            }
+            ;;
+    esac
+    
+    echo_tty "[${c_info}OVA${c_null}] Конвертация ${c_value}${selected_disk##*/}${c_null} (${src_format}) → qcow2..."
+    
+    local convert_threads
+    convert_threads=$( nproc | awk '{if($1>16) print 16; else print $1}' )
+    
+    # Рассчитываем виртуальный размер диска для tmpfs
+    local virt_size
+    virt_size=$( qemu-img info --output=json "$selected_disk" 2>/dev/null \
+        | grep -Po '"virtual-size"\s*:\s*\K[0-9]+' )
+    [[ -n "$virt_size" ]] && configure_imgdir add-size "$virt_size"
+    
+    if [[ "$src_format" == 'qcow2' ]]; then
+        # Уже qcow2 — просто перемещаем
+        mv "$selected_disk" "$output_disk" \
+            || { echo_err "Ошибка $FUNCNAME: не удалось переместить диск"; rm -rf "$ova_extract_dir"; exit_clear; }
+    else
+        # Конвертируем в qcow2
+        qemu-img convert -m "$convert_threads" -p -f "$src_format" -O qcow2 \
+            "$selected_disk" "$output_disk" \
+            || { echo_err "Ошибка $FUNCNAME: конвертация диска завершилась с ошибкой (код: $?)"; rm -rf "$ova_extract_dir"; exit_clear; }
+    fi
+    
+    # Проверяем результат
+    [[ ! -r "$output_disk" ]] && {
+        echo_err "Ошибка $FUNCNAME: выходной файл '$output_disk' не доступен"
+        rm -rf "$ova_extract_dir"
+        exit_clear
+    }
+    
+    local out_size=$( du -h "$output_disk" | awk '{print $1}' )
+    echo_ok "[OVA] Диск сконвертирован: ${c_value}${output_disk##*/}${c_null} (${out_size})"
+    
+    # Очищаем временную директорию (кроме результата)
+    rm -rf "$ova_extract_dir"
+    
+    # Обновляем переменную — теперь она указывает на готовый qcow2
+    ref_ova_path="$output_disk"
+    
+    # Добавляем во временные файлы для очистки
+    [[ ! -v var_tmp_img ]] && var_tmp_img=()
+    var_tmp_img+=( "$output_disk" )
+    
+    return 0
+}
+
 function deploy_stand_config() {
 
     function set_netif_conf() {
@@ -2089,7 +2243,13 @@ function deploy_stand_config() {
                 cmd_line+=( "--${disk_type}${disk_num}" "${config_base[storage]}:${BASH_REMATCH[1]},format=$config_disk_format" );
             else
                 file="$2"
-                get_file file || exit_clear
+        		# Проверяем — это OVA или обычный образ
+        		if [[ "$file" =~ \.(ova|OVA)$ ]] || [[ "$file" =~ \.(ova|OVA)\? ]]; then
+            		get_file file || exit_clear
+            		# import_ova_disk уже вызван внутри get_file
+        		else
+            		get_file file || exit_clear
+        		fi
             fi
             if [[ $disk_opts ]]; then
                 if [[ $disk_opts =~ (^|,\ *)overlay_img\ *=\ *([^, ]+(\ +[^, ]+)*) ]]; then
@@ -2724,20 +2884,27 @@ function create_custom_stand() {
             while true; do
                 echo_tty "  Доп. диск ${disk_idx}:"
                 echo_tty "    1. Пустой диск (указать размер)"
-                echo_tty "    2. ISO-образ (URL)"
-                echo_tty "    3. Готово"
-                local d_sel=$( read_question_select '    Тип' '^[1-3]$' '' '' '' 2 )
+                echo_tty "    2. ISO-образ (URL или путь)"
+                echo_tty "    3. Образ диска / OVA (URL или путь)"
+                echo_tty "    4. Готово"
+                local d_sel=$( read_question_select '    Тип' '^[1-4]$' '' '' '' 2 )
                 case "$d_sel" in
                     1)  local d_size=$( read_question_select '    Размер (ГБ)' '^[0-9]+(\.[0-9]+)?$' '' '' '1' 2 )
                         [[ -n "$d_size" ]] && { vm_str+="${nl}disk_${disk_idx} = ${d_size} GB"; ((disk_idx++)); }
                         ;;
-                    2)  local iso_url=$( read_question_select '    URL ISO-образа' '' '' '' '' 2 )
+                    2)  local iso_url=$( read_question_select '    URL/путь к ISO' '' '' '' '' 2 )
                         [[ -n "$iso_url" ]] && { vm_str+="${nl}iso_${disk_idx} = ${iso_url}"; ((disk_idx++)); }
+                        ;;
+                    3)  local img_url=$( read_question_select '    URL/путь к образу (.qcow2, .vmdk, .ova и др.)' '' '' '' '' 2 )
+                        if [[ -n "$img_url" ]]; then
+                            local disk_boot_prefix=''
+                            read_question '    Сделать загрузочным?' && disk_boot_prefix='boot_'
+                            vm_str+="${nl}${disk_boot_prefix}disk_${disk_idx} = ${img_url}"
+                            ((disk_idx++))
+                        fi
                         ;;
                     *)  break ;;
                 esac
-            done
-        }
 
         # --- access_role per-VM ---
         if $use_access && $create_access_network && [[ ${#config_access_roles[@]} -gt 0 ]]; then
