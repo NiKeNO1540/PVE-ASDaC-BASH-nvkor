@@ -1825,130 +1825,188 @@ function run_cmd() {
 }
 
 function import_ova_disk() {
-    # Импортирует OVA, извлекает диск, немедленно уничтожает временную ВМ и возвращает путь к диску.
-    # Использование: import_ova_disk <переменная_с_путём_ova> [номер_диска]
-    # Результат: переменная будет перезаписана реальным путём к импортированному диску.
-    
-    [[ "$1" == '' ]] && { echo_err "Ошибка $FUNCNAME: не указана переменная для пути"; exit_clear; }
-    local -n ref_ova_path="$1"
-    local disk_index=${2:-0}
-    local ova_file="$ref_ova_path"
-    
-    # 1. Проверяем, что файл является OVA (tar-архивом)
-    local file_mime
-    file_mime=$(file -bi "$ova_file" 2>/dev/null)
-    if [[ ! "$file_mime" =~ application/(x-tar|x-gtar|octet-stream) ]] && \
-       [[ ! "$ova_file" =~ \.(ova|OVA)$ ]]; then
-        return 1 # Это не OVA, основной скрипт обработает его иначе
-    fi
-    
-    # 2. Проверяем наличие 'qm'
-    if ! command -v qm &> /dev/null; then
-        echo_err "Ошибка $FUNCNAME: команда 'qm' не найдена (требуется Proxmox VE)"; exit_clear
-    fi
-    
-    local ova_basename
-    ova_basename=$(basename "$ova_file" .ova)
-    
-    # 3. Распаковка OVA
-    local ova_extract_dir
-    ova_extract_dir=$(mktemp -d "${config_base[mk_tmpfs_imgdir]}/ova_${ova_basename}_XXXXXX") \
-        || { echo_err "Ошибка $FUNCNAME: не удалось создать временную директорию"; exit_clear; }
-    
-    echo_tty "[${c_info}OVA${c_null}] Распаковка ${c_value}${ova_file##*/}${c_null}..."
-    tar -xf "$ova_file" -C "$ova_extract_dir" >/dev/null 2>&1 \
-        || { echo_err "Ошибка $FUNCNAME: не удалось распаковать OVA '$ova_file'"; rm -rf "$ova_extract_dir"; exit_clear; }
-    
-    local ovf_file
-    ovf_file=$(find "$ova_extract_dir" -maxdepth 1 -iname '*.ovf' -print -quit)
-    [[ -z "$ovf_file" ]] && { echo_err "Ошибка $FUNCNAME: не найден .ovf файл в архиве"; rm -rf "$ova_extract_dir"; exit_clear; }
-    
-    # 4. Генерация временного VMID
-    local vmid=9000
-    while qm status "$vmid" &>/dev/null; do
-        ((vmid++))
-        [[ $vmid -gt 9999 ]] && { echo_err "Ошибка $FUNCNAME: не найден свободный VMID в диапазоне 9000-9999"; exit_clear; }
-    done
-    echo_verbose "[OVA] Сгенерирован временный VMID для импорта: $vmid"
+ # Импортирует OVA/OVF в Proxmox через qm importovf и возвращает реальный путь к выбранному диску
+ # Использование: import_ova_disk <переменная_с_путём_ova_или_ovf> [номер_диска] [vmid]
+ # Результат: переменная будет перезаписана путём к импортированному диску (реальный путь через pvesm path)
+ #
+ # ВАЖНО:
+ # - Никаких qemu-img convert/mv/cp НЕ используется.
+ # - Делается только распаковка OVA (tar) -> qm importovf.
+ # - После импорта ВМ ОСТАЁТСЯ в PVE (это нормальное поведение qm importovf).
 
-    # 5. Импорт в временную VM
-    local storage="${config_base[storage]:-local-lvm}"
-    if ! pvesm status -storage "$storage" &>/dev/null; then
-        echo_warn "[OVA] Хранилище '$storage' не найдено. Используется 'local-lvm'."
-        storage="local-lvm"
-    fi
-    
-    echo_tty "[${c_info}OVA${c_null}] Импорт во временную VM ${c_value}${vmid}${c_null} (хранилище: ${c_value}${storage}${c_null})..."
-    
-    if ! qm importovf "$vmid" "$ovf_file" "$storage" --format "${config_disk_format:-qcow2}" >/dev/null 2>&1; then
-        echo_err "Ошибка $FUNCNAME: 'qm importovf' завершился с ошибкой"
-        rm -rf "$ova_extract_dir"; exit_clear
-    fi
-    
-    # 6. Извлечение информации о дисках из созданной ВМ
-    local disk_config
-    disk_config=$(qm config "$vmid" 2>/dev/null)
-    local -a vm_disks=()
-    while IFS= read -r disk_line; do
-        vm_disks+=("$disk_line")
-    done < <(echo "$disk_config" | grep -E '^(scsi|virtio|sata|ide)[0-9]+:')
-    
-    [[ ${#vm_disks[@]} -eq 0 ]] && { echo_err "Ошибка: в импортированной VM не найдено дисков"; qm destroy "$vmid" --purge >/dev/null 2>&1; rm -rf "$ova_extract_dir"; exit_clear; }
+ [[ "$1" == '' ]] && { echo_err "Ошибка $FUNCNAME: не указана переменная"; exit_clear; }
+ local -n ref_ova_path="$1"
+ local disk_index=${2:-0}
+ local vmid=${3:-}
+ local src_file="$ref_ova_path"
 
-    # 7. Выбор нужного диска и его "спасение"
-    if [[ $disk_index -ge ${#vm_disks[@]} ]]; then
-        echo_warn "[OVA] Запрошен диск №${disk_index}, но импортировано только ${#vm_disks[@]}. Используется диск №0."
-        disk_index=0
-    fi
-    
-    local selected_disk_line="${vm_disks[$disk_index]}"
-    local selected_disk_pve_path
-    selected_disk_pve_path=$(echo "$selected_disk_line" | grep -oP ':\s*\K[^,]+')
-    
-    local selected_disk_real_path
-    selected_disk_real_path=$(pvesm path "$selected_disk_pve_path" 2>/dev/null)
-    
-    if [[ ! -f "$selected_disk_real_path" && ! -b "$selected_disk_real_path" ]]; then
-        echo_err "Ошибка $FUNCNAME: файл/устройство диска не найдено: $selected_disk_real_path"
-        qm destroy "$vmid" --purge >/dev/null 2>&1; rm -rf "$ova_extract_dir"; exit_clear
-    fi
+ # В dry-run ничего реально не импортируем (и не ломаем последующую логику)
+ $opt_dry_run && return 1
 
-    # Создаем уникальное имя для "спасенного" диска во временной директории
-    local detached_disk_name="${ova_basename}_disk${disk_index}_$(date +%s).qcow2"
-    local detached_disk_path="${config_base[mk_tmpfs_imgdir]}/${detached_disk_name}"
+ # Быстрые проверки
+ command -v qm >/dev/null 2>&1 || { echo_err "Ошибка $FUNCNAME: команда 'qm' не найдена"; exit_clear; }
+ command -v pvesm >/dev/null 2>&1 || { echo_err "Ошибка $FUNCNAME: команда 'pvesm' не найдена"; exit_clear; }
 
-    echo_tty "[${c_info}OVA${c_null}] Перемещение диска для сохранения..."
-    # Перемещаем/копируем диск. `dd` - универсальный способ для файлов и блочных устройств.
-    # Если хранилище файловое, qemu-img convert будет эффективнее.
-    if [[ -f "$selected_disk_real_path" ]]; then
-        qemu-img convert -O qcow2 "$selected_disk_real_path" "$detached_disk_path" \
-            || { echo_err "Ошибка: не удалось сконвертировать/переместить диск"; qm destroy "$vmid" --purge >/dev/null 2>&1; rm -rf "$ova_extract_dir"; exit_clear; }
-    else # Для LVM и других блочных устройств
-        dd if="$selected_disk_real_path" of="$detached_disk_path" bs=4M status=progress \
-            || { echo_err "Ошибка: не удалось скопировать диск с помощью dd"; qm destroy "$vmid" --purge >/dev/null 2>&1; rm -rf "$ova_extract_dir"; exit_clear; }
-    fi
-    
-    # 8. Уничтожение временной VM вместе со всеми ее дисками
-    echo_tty "[${c_info}OVA${c_null}] Уничтожение временной VM ${c_value}${vmid}${c_null}..."
-    qm destroy "$vmid" --purge --destroy-unreferenced-disks 1 >/dev/null 2>&1 \
-        || echo_warn "Не удалось полностью уничтожить временную VM $vmid. Возможно, потребуется ручная очистка."
-    
-    # 9. Финальные шаги
-    local disk_size
-    disk_size=$(du -h "$detached_disk_path" | awk '{print $1}')
-    echo_ok "[OVA] Диск готов: ${c_value}${detached_disk_name}${c_null} (${disk_size:-?})"
-    
-    # Очищаем директорию распаковки
+ [[ ! -r "$src_file" ]] && { echo_err "Ошибка $FUNCNAME: файл недоступен для чтения: $src_file"; exit_clear; }
+
+ local file_mime
+ file_mime=$( file -bi "$src_file" 2>/dev/null || true )
+
+ local ova_extract_dir='' created_extract_dir=false
+ local ovf_file=''
+
+ # Определяем вход: OVA или OVF
+ if [[ "$src_file" =~ \.(ovf|OVF)$ ]]; then
+  ovf_file="$src_file"
+  ova_extract_dir="$( dirname "$ovf_file" )"
+ else
+  if [[ "$src_file" =~ \.(ova|OVA)$ ]] || [[ "$file_mime" =~ application/(x-tar|x-gtar|octet-stream) ]]; then
+   local ova_basename
+   ova_basename="$( basename "$src_file" )"
+   ova_basename="${ova_basename%.*}"
+
+   ova_extract_dir="$( mktemp -d "${config_base[mk_tmpfs_imgdir]}/ova_${ova_basename}_XXXXXX" )" \
+    || { echo_err "Ошибка $FUNCNAME: не удалось создать временную директорию"; exit_clear; }
+   created_extract_dir=true
+
+   echo_tty "[${c_info}OVA${c_null}] Распаковка ${c_value}${src_file##*/}${c_null}..."
+   tar -xf "$src_file" -C "$ova_extract_dir" 2>/dev/null \
+    || { echo_err "Ошибка $FUNCNAME: не удалось распаковать OVA архив '$src_file'"; rm -rf "$ova_extract_dir"; exit_clear; }
+
+   ovf_file="$( find "$ova_extract_dir" -maxdepth 1 -iname '*.ovf' -print -quit )"
+   [[ -z "$ovf_file" ]] && {
+    echo_err "Ошибка $FUNCNAME: не найден .ovf файл внутри OVA"
     rm -rf "$ova_extract_dir"
-    
-    # Обновляем переменную — теперь она указывает на "спасенный" qcow2 файл
-    ref_ova_path="$detached_disk_path"
-    
-    # Добавляем во временные файлы для очистки в конце скрипта
-    [[ ! -v var_tmp_img ]] && declare -a var_tmp_img=()
-    var_tmp_img+=("$detached_disk_path")
-    
-    return 0
+    exit_clear
+   }
+  else
+   # не OVA/OVF
+   return 1
+  fi
+ fi
+
+ echo_verbose "[OVA] OVF: $ovf_file"
+
+ # Извлекаем имя/описание из OVF (не критично, если не найдется)
+ local ovf_vm_name ovf_vm_descr
+ ovf_vm_name=$( grep -oP '<VirtualSystem[^>]*ovf:id="\K[^"]+' "$ovf_file" 2>/dev/null | head -1 )
+ ovf_vm_descr=$( grep -oP '<AnnotationSection>.*?<Info>\K[^<]+' "$ovf_file" 2>/dev/null | head -1 )
+
+ local ovf_base
+ ovf_base="$( basename "$ovf_file" )"
+ ovf_base="${ovf_base%.*}"
+
+ local vm_name="${ovf_vm_name:-$ovf_base}"
+
+ # VMID: если не задан — ищем свободный, начиная с 9000
+ if [[ -n "$vmid" ]]; then
+  isdigit_check "$vmid" 100 999900000 || { echo_err "Ошибка $FUNCNAME: vmid='$vmid' некорректен"; $created_extract_dir && rm -rf "$ova_extract_dir"; exit_clear; }
+  qm status "$vmid" &>/dev/null && { echo_err "Ошибка $FUNCNAME: VMID $vmid уже существует"; $created_extract_dir && rm -rf "$ova_extract_dir"; exit_clear; }
+ else
+  vmid=9000
+  while qm status "$vmid" &>/dev/null; do
+   ((vmid++))
+   [[ $vmid -gt 9999 ]] && { echo_err "Ошибка $FUNCNAME: не найден свободный VMID в диапазоне 9000-9999"; $created_extract_dir && rm -rf "$ova_extract_dir"; exit_clear; }
+  done
+ fi
+
+ # Storage берём из config_base[storage] (как в скрипте)
+ local storage="${config_base[storage]}"
+ if [[ -z "$storage" || "$storage" =~ ^\{(auto|manual)\}$ ]]; then
+  echo_warn "[OVA] storage='${storage}' не задан/авто. Используется 'local-lvm'"
+  storage="local-lvm"
+ fi
+ pvesm status -storage "$storage" &>/dev/null || {
+  echo_warn "[OVA] Storage '${storage}' не найден/недоступен. Используется 'local-lvm'"
+  storage="local-lvm"
+ }
+
+ # Формат диска: в скрипте это глобальная переменная config_disk_format (ставится в configure_storage)
+ local fmt="${config_disk_format:-qcow2}"
+ [[ "$fmt" != 'raw' && "$fmt" != 'qcow2' ]] && fmt='qcow2'
+
+ echo_tty "[${c_info}OVA${c_null}] Импорт OVF в VMID ${c_value}${vmid}${c_null} (storage: ${c_value}${storage}${c_null}, format: ${c_value}${fmt}${c_null})..."
+
+ # Импорт строго через qm importovf
+ local -a import_opts=( --format "$fmt" )
+ [[ -n "$vm_name" ]] && import_opts+=( --name "$vm_name" )
+ [[ -n "$ovf_vm_descr" ]] && import_opts+=( --description "$ovf_vm_descr" )
+
+ set -o pipefail
+ if ! qm importovf "$vmid" "$ovf_file" "$storage" "${import_opts[@]}" 2>&1 \
+  | grep -v '^$' \
+  | while IFS= read -r line; do echo_verbose "[qm importovf] $line"; done
+ then
+  local ec=${PIPESTATUS[0]}
+  set +o pipefail
+  echo_err "Ошибка $FUNCNAME: qm importovf завершился с ошибкой (код: $ec)"
+  $created_extract_dir && rm -rf "$ova_extract_dir"
+  exit_clear
+ fi
+ set +o pipefail
+
+ echo_ok "[OVA] Импорт завершен: VMID ${c_value}${vmid}${c_null}"
+
+ # Получаем список дисков из конфига VM
+ local disk_config
+ disk_config="$( qm config "$vmid" 2>/dev/null )"
+ [[ -z "$disk_config" ]] && {
+  echo_err "Ошибка $FUNCNAME: не удалось получить конфигурацию VM $vmid"
+  $created_extract_dir && rm -rf "$ova_extract_dir"
+  exit_clear
+ }
+
+ local -a vm_disks=()
+ while IFS= read -r disk_line; do
+  vm_disks+=( "$disk_line" )
+ done < <( echo "$disk_config" | grep -E '^(scsi|virtio|sata|ide)[0-9]+:' | sort -V )
+
+ [[ ${#vm_disks[@]} -eq 0 ]] && {
+  echo_err "Ошибка $FUNCNAME: в VM $vmid не найдено дисков"
+  $created_extract_dir && rm -rf "$ova_extract_dir"
+  exit_clear
+ }
+
+ if [[ $disk_index -ge ${#vm_disks[@]} ]]; then
+  echo_warn "[OVA] Запрошен диск №${disk_index}, но импортировано ${#vm_disks[@]} диск(ов). Используется №0"
+  disk_index=0
+ fi
+
+ local selected_disk_line="${vm_disks[$disk_index]}"
+ local volid
+ volid="$( echo "$selected_disk_line" | sed -E 's/^[^:]+:\s*([^,]+).*/\1/' )"
+
+ [[ -z "$volid" ]] && {
+  echo_err "Ошибка $FUNCNAME: не удалось извлечь volid из строки: $selected_disk_line"
+  $created_extract_dir && rm -rf "$ova_extract_dir"
+  exit_clear
+ }
+
+ # Реальный путь к диску через pvesm path
+ local real_disk_path
+ real_disk_path="$( pvesm path "$volid" 2>/dev/null || true )"
+
+ [[ -z "$real_disk_path" || ! -e "$real_disk_path" ]] && {
+  echo_err "Ошибка $FUNCNAME: не удалось получить реальный путь диска: volid='$volid', path='$real_disk_path'"
+  $created_extract_dir && rm -rf "$ova_extract_dir"
+  exit_clear
+ }
+
+ echo_ok "[OVA] Диск готов: ${c_value}${volid}${c_null}"
+ echo_tty "      Путь: ${c_value}${real_disk_path}${c_null}"
+
+ # Чистим временную распаковку (если распаковывали)
+ $created_extract_dir && rm -rf "$ova_extract_dir"
+
+ # Обновляем переменную — теперь это путь к импортированному диску
+ ref_ova_path="$real_disk_path"
+
+ # Экспортируем (если нужно дальше по скрипту/пользователю)
+ export OVA_IMPORT_VMID="$vmid"
+ export OVA_IMPORT_VOLID="$volid"
+ export OVA_IMPORT_DISK_PATH="$real_disk_path"
+
+ return 0
 }
 
 function deploy_stand_config() {
